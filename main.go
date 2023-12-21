@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,7 +12,76 @@ import (
 	"github.com/snorwin/haproxy-reload-wrapper/pkg/exec"
 	"github.com/snorwin/haproxy-reload-wrapper/pkg/log"
 	"github.com/snorwin/haproxy-reload-wrapper/pkg/utils"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
+
+func startCMWatcher(k8sCMName string) {
+
+	ns_filename := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	nsBytes, err := os.ReadFile(ns_filename)
+	if err != nil {
+		panic(fmt.Sprintf("Unable to read namespace file at %s", ns_filename))
+	}
+
+	namespace := string(nsBytes)
+
+	clientCfg, err := rest.InClusterConfig()
+	if err != nil {
+		panic("Unable to get our client configuration")
+	}
+
+	clientset, err := kubernetes.NewForConfig(clientCfg)
+	if err != nil {
+		panic("Unable to create our clientset")
+	}
+
+	writePath := utils.LookupHAProxyConfigFile()
+	// get the destination
+	go watchForChanges(clientset, k8sCMName, namespace, writePath)
+
+}
+
+func watchForChanges(clientset *kubernetes.Clientset, cm_name, namespace, writePath string) {
+	for {
+		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
+			metav1.SingleObject(metav1.ObjectMeta{Name: cm_name, Namespace: namespace}))
+		if err != nil {
+			panic("Unable to create watcher")
+		}
+		updateCMFile(watcher.ResultChan(), writePath)
+	}
+}
+
+func updateCMFile(eventChannel <-chan watch.Event, writePath string) {
+	for {
+		event, open := <-eventChannel
+		if open {
+			switch event.Type {
+			case watch.Added:
+				fallthrough
+			case watch.Modified:
+				// Update our endpoint
+				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
+					if endpointKey, ok := updatedMap.Data["current.target"]; ok {
+						if targetEndpoint, ok := updatedMap.Data[endpointKey]; ok {
+							log.Notice(targetEndpoint)
+							log.Notice("should write to: " + writePath)
+						}
+					}
+				}
+			default:
+				// Do nothing
+			}
+		} else {
+			// If eventChannel is closed, it means the server has closed the connection
+			return
+		}
+	}
+}
 
 func main() {
 	// fetch the absolut path of the haproxy executable
@@ -19,6 +89,10 @@ func main() {
 	if err != nil {
 		log.Emergency(err.Error())
 		os.Exit(1)
+	}
+	k8sCMName := os.Getenv("K8S_CM_NAME")
+	if k8sCMName != "" {
+		startCMWatcher(k8sCMName)
 	}
 
 	// execute haproxy with the flags provided as a child process asynchronously
