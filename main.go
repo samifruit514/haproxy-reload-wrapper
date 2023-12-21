@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -41,6 +42,7 @@ func startCMWatcher(k8sCMName string) {
 
 	writePath := utils.LookupHAProxyConfigFile()
 	// get the destination
+	fmt.Printf("start wait for changes")
 	go watchForChanges(clientset, k8sCMName, namespace, writePath)
 
 }
@@ -57,6 +59,7 @@ func watchForChanges(clientset *kubernetes.Clientset, cm_name, namespace, writeP
 }
 
 func updateCMFile(eventChannel <-chan watch.Event, writePath string) {
+	file_in_cm := filepath.Base(writePath)
 	for {
 		event, open := <-eventChannel
 		if open {
@@ -66,12 +69,18 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath string) {
 			case watch.Modified:
 				// Update our endpoint
 				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
-					if endpointKey, ok := updatedMap.Data["current.target"]; ok {
-						if targetEndpoint, ok := updatedMap.Data[endpointKey]; ok {
-							log.Notice(targetEndpoint)
-							log.Notice("should write to: " + writePath)
+					for k, v := range updatedMap.Data {
+						log.Notice(fmt.Sprintf("Is %s == %s?", k, file_in_cm))
+						if k == file_in_cm {
+							log.Notice("writing to: " + writePath)
+							err := os.WriteFile(writePath, []byte(v), 0644)
+							if err != nil {
+								log.Emergency(err.Error())
+							}
+
 						}
 					}
+
 				}
 			default:
 				// Do nothing
@@ -92,6 +101,7 @@ func main() {
 	}
 	k8sCMName := os.Getenv("K8S_CM_NAME")
 	if k8sCMName != "" {
+		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName)
 	}
 
