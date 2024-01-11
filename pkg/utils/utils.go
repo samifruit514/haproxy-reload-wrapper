@@ -34,6 +34,19 @@ func LookupHAProxyConfigFile() string {
 	return file
 }
 
+func ReplaceHaproxyConfigFilePath(args []string, newFilePath string) []string {
+	newArgs := []string{}
+	for i := 1; i < len(args); i++ {
+		if args[i] == "-f" && i+1 < len(args) {
+			i+=2
+		} else {
+		}
+		newArgs = append(newArgs, args[i])
+	}
+
+	return newArgs
+}
+
 // LookupHAProxySocketPath lookup the value of HAPROXY_SOCKET environment variable (default:"/var/run/haproxy.sock")
 func LookupHAProxySocketPath() string {
 	if path, ok := os.LookupEnv("HAPROXY_SOCKET"); ok {

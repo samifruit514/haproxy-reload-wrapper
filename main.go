@@ -23,7 +23,7 @@ import (
 
 var k8s_watch_path = "/haproxy_k8s.cfg"
 
-func copy(src, dst string) (int64, error) {
+func copyFile(src, dst string) (int64, error) {
         sourceFileStat, err := os.Stat(src)
         if err != nil {
                 return 0, err
@@ -72,7 +72,7 @@ func startCMWatcher(k8sCMName string) {
     // creating a local copy from the mounted cm
 	writePath := k8s_watch_path
 	sourcePathForCopy := utils.LookupHAProxyConfigFile()
-	nBytes, err := copy(sourcePathForCopy, writePath)
+	nBytes, err := copyFile(sourcePathForCopy, writePath)
 	if err != nil {
 		panic(fmt.Sprintf("Unable to copy %s to %s: %s", sourcePathForCopy, writePath, err))
 	}
@@ -137,13 +137,19 @@ func main() {
 	}
 	k8sCMName := os.Getenv("K8S_CM_NAME")
 	k8sWatcherEnabled := (k8sCMName != "")
+	// copy the os.Args so we dont affect the actual os.Args
+	finalArgs := make([]string, len(os.Args))
+	copy(finalArgs, os.Args)
+	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName)
+		// fix path to k8s one for the real execution of haproxy
+
 	}
 
 	// execute haproxy with the flags provided as a child process asynchronously
-	cmd := exec.Command(executable, os.Args[1:]...)
+	cmd := exec.Command(executable, finalArgs[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = utils.LoadEnvFile()
@@ -202,7 +208,7 @@ func main() {
 			}
 
 			// create a new haproxy process which will replace the old one after it was successfully started
-			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, os.Args[1:]...)...)
+			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
 			tmp.Env = utils.LoadEnvFile()
