@@ -21,6 +21,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+var k8s_watch_path = "/haproxy_k8s.cfg"
+
 func copy(src, dst string) (int64, error) {
         sourceFileStat, err := os.Stat(src)
         if err != nil {
@@ -68,7 +70,7 @@ func startCMWatcher(k8sCMName string) {
 	// k8s watches for configmap updates and we are about to watch
     // the same file through the api. lets avoid conflicts by
     // creating a local copy from the mounted cm
-	writePath := utils.LookupHAProxyConfigFile()+"_k8s"
+	writePath := k8s_watch_path
 	sourcePathForCopy := utils.LookupHAProxyConfigFile()
 	nBytes, err := copy(sourcePathForCopy, writePath)
 	if err != nil {
@@ -152,11 +154,11 @@ func main() {
 	log.Notice(fmt.Sprintf("process %d started", cmd.Process.Pid))
 
 	watchPath := utils.LookupWatchPath()
-	if watchPath == "" {
-		watchPath = utils.LookupHAProxyConfigFile()
-		if k8sWatcherEnabled {
-		    // watching the _k8s path
-			watchPath+="_k8s"
+	if k8sWatcherEnabled {
+		watchPath = k8s_watch_path
+	} else {
+		if watchPath == "" {
+			watchPath = utils.LookupHAProxyConfigFile()
 		}
 	}
 
