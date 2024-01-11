@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+    "io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,31 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
+
+func copy(src, dst string) (int64, error) {
+        sourceFileStat, err := os.Stat(src)
+        if err != nil {
+                return 0, err
+        }
+
+        if !sourceFileStat.Mode().IsRegular() {
+                return 0, fmt.Errorf("%s is not a regular file", src)
+        }
+
+        source, err := os.Open(src)
+        if err != nil {
+                return 0, err
+        }
+        defer source.Close()
+
+        destination, err := os.Create(dst)
+        if err != nil {
+                return 0, err
+        }
+        defer destination.Close()
+        nBytes, err := io.Copy(destination, source)
+        return nBytes, err
+}
 
 func startCMWatcher(k8sCMName string) {
 
@@ -39,10 +65,18 @@ func startCMWatcher(k8sCMName string) {
 	if err != nil {
 		panic("Unable to create our clientset")
 	}
-
-	writePath := utils.LookupHAProxyConfigFile()
-	// get the destination
-	fmt.Printf("start wait for changes")
+	// k8s watches for configmap updates and we are about to watch
+    // the same file through the api. lets avoid conflicts by
+    // creating a local copy from the mounted cm
+	writePath := utils.LookupHAProxyConfigFile()+"_k8s"
+	sourcePathForCopy := utils.LookupHAProxyConfigFile()
+	nBytes, err := copy(sourcePathForCopy, writePath)
+	if err != nil {
+		panic(fmt.Sprintf("Unable to copy %s to %s: %s", sourcePathForCopy, writePath, err))
+	}
+	log.Notice(fmt.Sprintf("File copied %s to %s: %d bytes written", sourcePathForCopy, writePath, nBytes))
+	
+	log.Notice("start wait for changes")
 	go watchForChanges(clientset, k8sCMName, namespace, writePath)
 
 }
@@ -100,7 +134,8 @@ func main() {
 		os.Exit(1)
 	}
 	k8sCMName := os.Getenv("K8S_CM_NAME")
-	if k8sCMName != "" {
+	k8sWatcherEnabled := (k8sCMName != "")
+	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName)
 	}
@@ -119,6 +154,10 @@ func main() {
 	watchPath := utils.LookupWatchPath()
 	if watchPath == "" {
 		watchPath = utils.LookupHAProxyConfigFile()
+		if k8sWatcherEnabled {
+		    // watching the _k8s path
+			watchPath+="_k8s"
+		}
 	}
 
 	// create a fsnotify.Watcher for config changes
