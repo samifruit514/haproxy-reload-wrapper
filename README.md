@@ -1,5 +1,7 @@
 # HAProxy Reload Wrapper
 
+# This fork is a quick change for some urgent case where we need haproxy to be reload immediately after a configmap change
+
 ![Build](https://img.shields.io/github/actions/workflow/status/snorwin/haproxy-reload-wrapper/main.yml?label=Build%20%28main%29&style=flat-square)
 ![Release](https://img.shields.io/github/actions/workflow/status/snorwin/haproxy-reload-wrapper/publish.yml?label=Build%20%28Release%29&style=flat-square)
 ![E2E Tests](https://img.shields.io/github/actions/workflow/status/snorwin/haproxy-reload-wrapper/test.yml?label=E2E%20Tests&style=flat-square)
