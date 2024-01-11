@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-    "io"
 	"os"
 	"os/signal"
-	"path/filepath"
+	//"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -23,32 +22,8 @@ import (
 
 var k8s_watch_path = "/haproxy_k8s.cfg"
 
-func copyFile(src, dst string) (int64, error) {
-        sourceFileStat, err := os.Stat(src)
-        if err != nil {
-                return 0, err
-        }
 
-        if !sourceFileStat.Mode().IsRegular() {
-                return 0, fmt.Errorf("%s is not a regular file", src)
-        }
-
-        source, err := os.Open(src)
-        if err != nil {
-                return 0, err
-        }
-        defer source.Close()
-
-        destination, err := os.Create(dst)
-        if err != nil {
-                return 0, err
-        }
-        defer destination.Close()
-        nBytes, err := io.Copy(destination, source)
-        return nBytes, err
-}
-
-func startCMWatcher(k8sCMName string) {
+func startCMWatcher(k8sCMName, k8sCMKey string) {
 
 	ns_filename := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	nsBytes, err := os.ReadFile(ns_filename)
@@ -72,30 +47,30 @@ func startCMWatcher(k8sCMName string) {
     // creating a local copy from the mounted cm
 	writePath := k8s_watch_path
 	sourcePathForCopy := utils.LookupHAProxyConfigFile()
-	nBytes, err := copyFile(sourcePathForCopy, writePath)
+	nBytes, err := utils.CopyFile(sourcePathForCopy, writePath)
 	if err != nil {
 		panic(fmt.Sprintf("Unable to copy %s to %s: %s", sourcePathForCopy, writePath, err))
 	}
 	log.Notice(fmt.Sprintf("File copied %s to %s: %d bytes written", sourcePathForCopy, writePath, nBytes))
 	
 	log.Notice("start wait for changes")
-	go watchForChanges(clientset, k8sCMName, namespace, writePath)
+	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, writePath)
 
 }
 
-func watchForChanges(clientset *kubernetes.Clientset, cm_name, namespace, writePath string) {
+func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace, writePath string) {
 	for {
 		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
 			metav1.SingleObject(metav1.ObjectMeta{Name: cm_name, Namespace: namespace}))
 		if err != nil {
 			panic("Unable to create watcher")
 		}
-		updateCMFile(watcher.ResultChan(), writePath)
+		updateCMFile(watcher.ResultChan(), writePath, cm_key)
 	}
 }
 
-func updateCMFile(eventChannel <-chan watch.Event, writePath string) {
-	file_in_cm := filepath.Base(writePath)
+func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string) {
+	//key_in_cm := filepath.Base(writePath)
 	for {
 		event, open := <-eventChannel
 		if open {
@@ -106,8 +81,8 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath string) {
 				// Update our endpoint
 				if updatedMap, ok := event.Object.(*corev1.ConfigMap); ok {
 					for k, v := range updatedMap.Data {
-						log.Notice(fmt.Sprintf("Is %s == %s?", k, file_in_cm))
-						if k == file_in_cm {
+						log.Notice(fmt.Sprintf("Is %s == %s?", k, cm_key))
+						if k == cm_key {
 							log.Notice("writing to: " + writePath)
 							err := os.WriteFile(writePath, []byte(v), 0644)
 							if err != nil {
@@ -136,6 +111,7 @@ func main() {
 		os.Exit(1)
 	}
 	k8sCMName := os.Getenv("K8S_CM_NAME")
+	k8sCMKey := utils.GetEnv("K8S_CM_KEY", "haproxy.cfg")
 	k8sWatcherEnabled := (k8sCMName != "")
 	// copy the os.Args so we dont affect the actual os.Args
 	finalArgs := make([]string, len(os.Args))
@@ -143,7 +119,7 @@ func main() {
 	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
-		startCMWatcher(k8sCMName)
+		startCMWatcher(k8sCMName, k8sCMKey)
 		// fix path to k8s one for the real execution of haproxy
 
 	}
