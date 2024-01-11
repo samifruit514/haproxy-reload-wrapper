@@ -1,6 +1,5 @@
 # HAProxy Reload Wrapper
 
-# This fork is a quick change for some urgent case where we need haproxy to be reload immediately after a configmap change
 
 ![Build](https://img.shields.io/github/actions/workflow/status/snorwin/haproxy-reload-wrapper/main.yml?label=Build%20%28main%29&style=flat-square)
 ![Release](https://img.shields.io/github/actions/workflow/status/snorwin/haproxy-reload-wrapper/publish.yml?label=Build%20%28Release%29&style=flat-square)
@@ -28,3 +27,8 @@ The haproxy-reload-wrapper watches the HAProxy configuration file using an inoti
 3. Optionally set the `WATCH_PATH` environment variable to watch a directory instead of the haproxy.cfg file only
 4. Replace the `docker.io/haproxy` image with the `ghcr.io/snorwin/haproxy` image on container platforms or compile the source code and run `./haproxy-reload-wrapper` on a Linux system. As an example, check out the [Helm chart](test/helm) used for the tests.
 5. Modify the configuration file and let the magic happen.✨
+
+## k8s configmap watcher feature
+### This fork is a quick change for some urgent case where we need haproxy to be reload immediately after a configmap change
+### unit tests
+go test ./pkg/utils/...
