@@ -23,7 +23,7 @@ import (
 var k8s_watch_path = "/haproxy_k8s.cfg"
 
 
-func startCMWatcher(k8sCMName, k8sCMKey string) {
+func startCMWatcher(k8sCMName, k8sCMWatchPath, k8sCMKey string, chConfig chan bool) {
 
 	ns_filename := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	nsBytes, err := os.ReadFile(ns_filename)
@@ -45,7 +45,7 @@ func startCMWatcher(k8sCMName, k8sCMKey string) {
 	// k8s watches for configmap updates and we are about to watch
     // the same file through the api. lets avoid conflicts by
     // creating a local copy from the mounted cm
-	writePath := k8s_watch_path
+	writePath := k8sCMWatchPath
 	sourcePathForCopy := utils.LookupHAProxyConfigFile()
 	nBytes, err := utils.CopyFile(sourcePathForCopy, writePath)
 	if err != nil {
@@ -54,22 +54,22 @@ func startCMWatcher(k8sCMName, k8sCMKey string) {
 	log.Notice(fmt.Sprintf("File copied %s to %s: %d bytes written", sourcePathForCopy, writePath, nBytes))
 	
 	log.Notice("start wait for changes")
-	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, writePath)
+	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, writePath, chConfig)
 
 }
 
-func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace, writePath string) {
+func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace, writePath string, chConfig chan bool) {
 	for {
 		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
 			metav1.SingleObject(metav1.ObjectMeta{Name: cm_name, Namespace: namespace}))
 		if err != nil {
 			panic("Unable to create watcher")
 		}
-		updateCMFile(watcher.ResultChan(), writePath, cm_key)
+		updateCMFile(watcher.ResultChan(), writePath, cm_key, chConfig)
 	}
 }
 
-func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string) {
+func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chConfig chan bool) {
 	//key_in_cm := filepath.Base(writePath)
 	for {
 		event, open := <-eventChannel
@@ -85,6 +85,7 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string) {
 						if k == cm_key {
 							log.Notice("writing to: " + writePath)
 							err := os.WriteFile(writePath, []byte(v), 0644)
+							chConfig <- true
 							if err != nil {
 								log.Emergency(err.Error())
 							}
@@ -113,18 +114,23 @@ func main() {
 	k8sCMName := os.Getenv("K8S_CM_NAME")
 	k8sCMKey := utils.GetEnv("K8S_CM_KEY", "haproxy.cfg")
 	k8sWatcherEnabled := (k8sCMName != "")
+	k8s_watch_path := utils.GetEnv("K8S_WATCH_PATH", "/haproxy_k8s.cfg")
 	// copy the os.Args so we dont affect the actual os.Args
 	finalArgs := make([]string, len(os.Args))
 	copy(finalArgs, os.Args)
 	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
+	
+	// direct chan, instead of writing to fs
+	chConfig := make(chan bool)
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
-		startCMWatcher(k8sCMName, k8sCMKey)
+		startCMWatcher(k8sCMName, k8sCMKey, k8s_watch_path, chConfig)
 		// fix path to k8s one for the real execution of haproxy
 
 	}
 
 	// execute haproxy with the flags provided as a child process asynchronously
+	fmt.Println(finalArgs[1:])
 	cmd := exec.Command(executable, finalArgs[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -150,9 +156,11 @@ func main() {
 		log.Notice(fmt.Sprintf("fsnotify watcher create failed : %v", err))
 		os.Exit(1)
 	}
-	if err := fswatch.Add(watchPath); err != nil {
-		log.Notice(fmt.Sprintf("watch failed : %v", err))
-		os.Exit(1)
+	if k8sWatcherEnabled {
+		if err := fswatch.Add(watchPath); err != nil {
+			log.Notice(fmt.Sprintf("watch failed : %v", err))
+			os.Exit(1)
+		}
 	}
 	log.Notice(fmt.Sprintf("watch : %s", watchPath))
 
@@ -166,6 +174,32 @@ func main() {
 	// endless for loop which handles signals, file system events as well as termination of the child process
 	for {
 		select {
+		case <-chConfig:
+			cmdArgs := append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)
+			fmt.Println(cmdArgs)
+			tmp := exec.Command(executable, cmdArgs...)
+			tmp.Stdout = os.Stdout
+			tmp.Stderr = os.Stderr
+			tmp.Env = utils.LoadEnvFile()
+
+			if err := tmp.AsyncRun(); err != nil {
+				log.Warning(err.Error())
+				log.Warning("reload failed")
+				continue
+			}
+
+			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
+			select {
+			case <-cmd.Terminated:
+				// old haproxy terminated - successfully started a new process replacing the old one
+				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
+				log.Notice("reload successful")
+				cmd = tmp
+			case <-tmp.Terminated:
+				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
+				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
+				log.Warning("reload failed")
+			}
 		case event := <-fswatch.Events:
 			// only care about events which may modify the contents of the directory
 			if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Create)) {
@@ -184,7 +218,9 @@ func main() {
 			}
 
 			// create a new haproxy process which will replace the old one after it was successfully started
-			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
+			cmdArgs := append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)
+			fmt.Println(cmdArgs)
+			tmp := exec.Command(executable, cmdArgs...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
 			tmp.Env = utils.LoadEnvFile()
