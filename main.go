@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	//"path/filepath"
+	"time"
 	"strconv"
 	"syscall"
 
@@ -68,6 +69,33 @@ func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace
 		updateCMFile(watcher.ResultChan(), writePath, cm_key, chConfig)
 	}
 }
+// gracefulShutdowner gives 5 seconds to the new process to handle connections
+// exclude old process from accepting connections (but continue requests)
+// and wait graceful_timeout seconds so exchanges eventually disconnect
+func gracefulShutdowner(chPids chan int, graceful_timeout int) {
+	for {
+		select {
+		case pid := <-chPids:
+			fmt.Println(pid)
+
+			go func() {
+				select {
+				case <-time.After(time.Second * 5):
+					log.Notice(fmt.Sprintf("stop listening for pid %d (SIGTTOU)", pid))
+					syscall.Kill(pid,syscall.SIGTTOU)
+
+				}
+				select {
+				case <-time.After(time.Second * time.Duration(graceful_timeout)):
+					log.Notice(fmt.Sprintf("kill pid %d (SIGTERM)", pid))
+					syscall.Kill(pid,syscall.SIGTERM)
+
+				}
+			}()
+
+		}
+	}
+}
 
 func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chConfig chan bool) {
 	//key_in_cm := filepath.Base(writePath)
@@ -115,6 +143,11 @@ func main() {
 	k8sCMKey := utils.GetEnv("K8S_CM_KEY", "haproxy.cfg")
 	k8sWatcherEnabled := (k8sCMName != "")
 	k8s_watch_path := utils.GetEnv("K8S_WATCH_PATH", "/haproxy_k8s.cfg")
+	graceful_timeout := utils.GetEnv("HAPROXY_GRACEFUL_TIMEOUT_SEC", "300")
+	graceful_timeout_int, err := strconv.Atoi(graceful_timeout)
+    if err != nil {
+		panic(err)
+	}
 	// copy the os.Args so we dont affect the actual os.Args
 	finalArgs := make([]string, len(os.Args))
 	copy(finalArgs, os.Args)
@@ -125,7 +158,6 @@ func main() {
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName, k8sCMKey, k8s_watch_path, chConfig)
-		// fix path to k8s one for the real execution of haproxy
 
 	}
 
@@ -156,7 +188,7 @@ func main() {
 		log.Notice(fmt.Sprintf("fsnotify watcher create failed : %v", err))
 		os.Exit(1)
 	}
-	if k8sWatcherEnabled {
+	if !k8sWatcherEnabled {
 		if err := fswatch.Add(watchPath); err != nil {
 			log.Notice(fmt.Sprintf("watch failed : %v", err))
 			os.Exit(1)
@@ -171,7 +203,11 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 
+	pidsChan := make(chan int, 1)
+	go gracefulShutdowner(pidsChan, graceful_timeout_int)
+
 	// endless for loop which handles signals, file system events as well as termination of the child process
+	//pids := map[int]struct{}{}
 	for {
 		select {
 		case <-chConfig:
@@ -188,18 +224,10 @@ func main() {
 				continue
 			}
 
+			//pids[tmp.Process.Pid] = struct{}{}
+			pidsChan <- cmd.Process.Pid
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
-			select {
-			case <-cmd.Terminated:
-				// old haproxy terminated - successfully started a new process replacing the old one
-				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
-				log.Notice("reload successful")
-				cmd = tmp
-			case <-tmp.Terminated:
-				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
-				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
-				log.Warning("reload failed")
-			}
+			cmd = tmp
 		case event := <-fswatch.Events:
 			// only care about events which may modify the contents of the directory
 			if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Create)) {
@@ -217,9 +245,9 @@ func main() {
 				}
 			}
 
-			// create a new haproxy process which will replace the old one after it was successfully started
-			cmdArgs := append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)
-			fmt.Println(cmdArgs)
+			// create a new haproxy process which will start serving at the same time
+			// of the others
+			cmdArgs := finalArgs[1:]
 			tmp := exec.Command(executable, cmdArgs...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
@@ -232,17 +260,9 @@ func main() {
 			}
 
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
-			select {
-			case <-cmd.Terminated:
-				// old haproxy terminated - successfully started a new process replacing the old one
-				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
-				log.Notice("reload successful")
-				cmd = tmp
-			case <-tmp.Terminated:
-				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
-				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
-				log.Warning("reload failed")
-			}
+			// send old pid in the finish channel
+			pidsChan <- cmd.Process.Pid
+			cmd = tmp
 		case err := <-fswatch.Errors:
 			// handle errors of fsnotify.Watcher
 			log.Alert(err.Error())
