@@ -211,8 +211,7 @@ func main() {
 	for {
 		select {
 		case <-chConfig:
-			cmdArgs := append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)
-			fmt.Println(cmdArgs)
+			cmdArgs := finalArgs[1:]
 			tmp := exec.Command(executable, cmdArgs...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
@@ -224,7 +223,6 @@ func main() {
 				continue
 			}
 
-			//pids[tmp.Process.Pid] = struct{}{}
 			pidsChan <- cmd.Process.Pid
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
 			cmd = tmp
