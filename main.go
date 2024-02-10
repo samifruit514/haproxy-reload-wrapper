@@ -129,6 +129,25 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 	}
 }
 
+func validateConfig(executable string, cmdArgs []string) bool {
+
+	tmp := exec.Command(executable, append(cmdArgs,"-c")...)
+	tmp.Stdout = os.Stdout
+	tmp.Stderr = os.Stderr
+	tmp.Env = utils.LoadEnvFile()
+
+	if err := tmp.AsyncRun(); err != nil {
+		log.Warning(err.Error())
+		log.Warning("reload failed")
+		return false
+	}
+	select {
+	case <-tmp.Terminated:
+		return tmp.ProcessState.ExitCode() == 0
+	}
+	return false
+}
+
 func main() {
 	// fetch the absolut path of the haproxy executable
 	executable, err := utils.LookupExecutablePathAbs("haproxy")
@@ -209,6 +228,13 @@ func main() {
 		select {
 		case <-chConfig:
 			cmdArgs := finalArgs[1:]
+			configIsValid := validateConfig(executable, cmdArgs)
+			if configIsValid {
+				log.Notice("config is valid")
+			} else {
+				log.Warning("config is INVALID. no reload!")
+				continue
+			}
 			tmp := exec.Command(executable, cmdArgs...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
@@ -243,6 +269,15 @@ func main() {
 			// create a new haproxy process which will start serving at the same time
 			// of the others
 			cmdArgs := finalArgs[1:]
+			configIsValid := validateConfig(executable, cmdArgs)
+			if configIsValid {
+				log.Notice("config is valid")
+			} else {
+				log.Warning("config is INVALID. no reload!")
+				continue
+			}
+
+
 			tmp := exec.Command(executable, cmdArgs...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
