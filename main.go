@@ -21,10 +21,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-var k8s_watch_path = "/haproxy_k8s.cfg"
-
-
-func startCMWatcher(k8sCMName, k8sCMWatchPath, k8sCMKey string, chConfig chan bool) {
+func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bool) {
 
 	ns_filename := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	nsBytes, err := os.ReadFile(ns_filename)
