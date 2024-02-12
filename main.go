@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	//"path/filepath"
-	"time"
 	"strconv"
 	"syscall"
 
@@ -66,33 +65,6 @@ func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace
 		updateCMFile(watcher.ResultChan(), writePath, cm_key, chConfig)
 	}
 }
-// gracefulShutdowner gives 5 seconds to the new process to handle connections
-// exclude old process from accepting connections (but continue requests)
-// and wait graceful_timeout seconds so exchanges eventually disconnect
-func gracefulShutdowner(chPids chan int, graceful_timeout int) {
-	for {
-		select {
-		case pid := <-chPids:
-			fmt.Println(pid)
-
-			go func() {
-				select {
-				case <-time.After(time.Second * 5):
-					log.Notice(fmt.Sprintf("stop listening for pid %d (SIGTTOU)", pid))
-					syscall.Kill(pid,syscall.SIGTTOU)
-
-				}
-				select {
-				case <-time.After(time.Second * time.Duration(graceful_timeout)):
-					log.Notice(fmt.Sprintf("kill pid %d (SIGUSR1) - soft stop", pid))
-					syscall.Kill(pid,syscall.SIGUSR1)
-
-				}
-			}()
-
-		}
-	}
-}
 
 func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chConfig chan bool) {
 	//key_in_cm := filepath.Base(writePath)
@@ -129,25 +101,6 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 	}
 }
 
-func validateConfig(executable string, cmdArgs []string) bool {
-
-	tmp := exec.Command(executable, append(cmdArgs,"-c")...)
-	tmp.Stdout = os.Stdout
-	tmp.Stderr = os.Stderr
-	tmp.Env = utils.LoadEnvFile()
-
-	if err := tmp.AsyncRun(); err != nil {
-		log.Warning(err.Error())
-		log.Warning("unable to validate Config")
-		return false
-	}
-	select {
-	case <-tmp.Terminated:
-		return tmp.ProcessState.ExitCode() == 0
-	}
-	return false
-}
-
 func main() {
 	// fetch the absolut path of the haproxy executable
 	executable, err := utils.LookupExecutablePathAbs("haproxy")
@@ -159,11 +112,6 @@ func main() {
 	k8sCMKey := utils.GetEnv("K8S_CM_KEY", "haproxy.cfg")
 	k8sWatcherEnabled := (k8sCMName != "")
 	k8s_watch_path := utils.GetEnv("K8S_WATCH_PATH", "/haproxy_k8s.cfg")
-	graceful_timeout := utils.GetEnv("HAPROXY_GRACEFUL_TIMEOUT_SEC", "300")
-	graceful_timeout_int, err := strconv.Atoi(graceful_timeout)
-    if err != nil {
-		panic(err)
-	}
 	// copy the os.Args so we dont affect the actual os.Args
 	finalArgs := make([]string, len(os.Args))
 	copy(finalArgs, os.Args)
@@ -178,7 +126,6 @@ func main() {
 	}
 
 	// execute haproxy with the flags provided as a child process asynchronously
-	fmt.Println(finalArgs[1:])
 	cmd := exec.Command(executable, finalArgs[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -219,23 +166,11 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 
-	pidsChan := make(chan int, 1)
-	go gracefulShutdowner(pidsChan, graceful_timeout_int)
-
 	// endless for loop which handles signals, file system events as well as termination of the child process
-	//pids := map[int]struct{}{}
 	for {
 		select {
 		case <-chConfig:
-			cmdArgs := finalArgs[1:]
-			configIsValid := validateConfig(executable, cmdArgs)
-			if configIsValid {
-				log.Notice("config is valid")
-			} else {
-				log.Warning("config is INVALID. no reload!")
-				continue
-			}
-			tmp := exec.Command(executable, cmdArgs...)
+			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
 			tmp.Env = utils.LoadEnvFile()
@@ -246,7 +181,6 @@ func main() {
 				continue
 			}
 
-			pidsChan <- cmd.Process.Pid
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
 			cmd = tmp
 		case event := <-fswatch.Events:
@@ -266,19 +200,8 @@ func main() {
 				}
 			}
 
-			// create a new haproxy process which will start serving at the same time
-			// of the others
-			cmdArgs := finalArgs[1:]
-			configIsValid := validateConfig(executable, cmdArgs)
-			if configIsValid {
-				log.Notice("config is valid")
-			} else {
-				log.Warning("config is INVALID. no reload!")
-				continue
-			}
-
-
-			tmp := exec.Command(executable, cmdArgs...)
+			// create a new haproxy process which will replace the old one after it was successfully started
+			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
 			tmp.Env = utils.LoadEnvFile()
@@ -290,9 +213,17 @@ func main() {
 			}
 
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
-			// send old pid in the finish channel
-			pidsChan <- cmd.Process.Pid
-			cmd = tmp
+			select {
+			case <-cmd.Terminated:
+				// old haproxy terminated - successfully started a new process replacing the old one
+				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
+				log.Notice("reload successful")
+				cmd = tmp
+			case <-tmp.Terminated:
+				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
+				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
+				log.Warning("reload failed")
+			}
 		case err := <-fswatch.Errors:
 			// handle errors of fsnotify.Watcher
 			log.Alert(err.Error())
