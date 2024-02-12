@@ -84,8 +84,8 @@ func gracefulShutdowner(chPids chan int, graceful_timeout int) {
 				}
 				select {
 				case <-time.After(time.Second * time.Duration(graceful_timeout)):
-					log.Notice(fmt.Sprintf("kill pid %d (SIGTERM)", pid))
-					syscall.Kill(pid,syscall.SIGTERM)
+					log.Notice(fmt.Sprintf("kill pid %d (SIGUSR1) - soft stop", pid))
+					syscall.Kill(pid,syscall.SIGUSR1)
 
 				}
 			}()
@@ -138,7 +138,7 @@ func validateConfig(executable string, cmdArgs []string) bool {
 
 	if err := tmp.AsyncRun(); err != nil {
 		log.Warning(err.Error())
-		log.Warning("reload failed")
+		log.Warning("unable to validate Config")
 		return false
 	}
 	select {
