@@ -182,7 +182,17 @@ func main() {
 			}
 
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
-			cmd = tmp
+			select {
+			case <-cmd.Terminated:
+				// old haproxy terminated - successfully started a new process replacing the old one
+				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
+				log.Notice("reload successful")
+				cmd = tmp
+			case <-tmp.Terminated:
+				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
+				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
+				log.Warning("reload failed")
+			}
 		case event := <-fswatch.Events:
 			// only care about events which may modify the contents of the directory
 			if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Create)) {
