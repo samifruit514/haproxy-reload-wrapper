@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+
 	//"path/filepath"
 	"strconv"
 	"syscall"
@@ -40,8 +41,8 @@ func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bo
 		panic("Unable to create our clientset")
 	}
 	// k8s watches for configmap updates and we are about to watch
-    // the same file through the api. lets avoid conflicts by
-    // creating a local copy from the mounted cm
+	// the same file through the api. lets avoid conflicts by
+	// creating a local copy from the mounted cm
 	writePath := k8sCMWatchPath
 	sourcePathForCopy := utils.LookupHAProxyConfigFile()
 	nBytes, err := utils.CopyFile(sourcePathForCopy, writePath)
@@ -49,7 +50,7 @@ func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bo
 		panic(fmt.Sprintf("Unable to copy %s to %s: %s", sourcePathForCopy, writePath, err))
 	}
 	log.Notice(fmt.Sprintf("File copied %s to %s: %d bytes written", sourcePathForCopy, writePath, nBytes))
-	
+
 	log.Notice("start wait for changes")
 	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, writePath, chConfig)
 
@@ -57,6 +58,7 @@ func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bo
 
 func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace, writePath string, chConfig chan bool) {
 	for {
+		log.Notice("Starting k8s watcher")
 		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
 			metav1.SingleObject(metav1.ObjectMeta{Name: cm_name, Namespace: namespace}))
 		if err != nil {
@@ -72,6 +74,10 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 		event, open := <-eventChannel
 		if open {
 			switch event.Type {
+			case watch.Error:
+				log.Warning(fmt.Sprintf("watch error: %v", event.Object))
+			case watch.Bookmark:
+				log.Warning(fmt.Sprintf("Bookmark received: %v", event.Object))
 			case watch.Added:
 				fallthrough
 			case watch.Modified:
@@ -86,9 +92,11 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 							if err != nil {
 								log.Emergency(err.Error())
 							}
-
 						}
 					}
+
+				} else {
+					log.Warning("modified not ok")
 
 				}
 			default:
@@ -96,6 +104,7 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 			}
 		} else {
 			// If eventChannel is closed, it means the server has closed the connection
+			log.Notice("closing watcher channel")
 			return
 		}
 	}
@@ -116,7 +125,7 @@ func main() {
 	finalArgs := make([]string, len(os.Args))
 	copy(finalArgs, os.Args)
 	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
-	
+
 	// direct chan, instead of writing to fs
 	chConfig := make(chan bool)
 	if k8sWatcherEnabled {
