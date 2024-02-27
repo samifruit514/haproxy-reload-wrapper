@@ -192,6 +192,7 @@ func main() {
 			if err := tmp.AsyncRun(); err != nil {
 				log.Warning(err.Error())
 				log.Warning("reload failed")
+				mu.Unlock()
 				continue
 			}
 
