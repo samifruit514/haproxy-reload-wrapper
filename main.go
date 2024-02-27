@@ -8,6 +8,7 @@ import (
 
 	//"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 
 	"github.com/fsnotify/fsnotify"
@@ -21,7 +22,9 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bool) {
+var mu sync.Mutex
+
+func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan []byte) {
 
 	ns_filename := "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	nsBytes, err := os.ReadFile(ns_filename)
@@ -52,11 +55,11 @@ func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan bo
 	log.Notice(fmt.Sprintf("File copied %s to %s: %d bytes written", sourcePathForCopy, writePath, nBytes))
 
 	log.Notice("start wait for changes")
-	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, writePath, chConfig)
+	go watchForChanges(clientset, k8sCMName, k8sCMKey, namespace, chConfig)
 
 }
 
-func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace, writePath string, chConfig chan bool) {
+func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace string, chConfig chan []byte) {
 	for {
 		log.Notice("Starting k8s watcher")
 		watcher, err := clientset.CoreV1().ConfigMaps(namespace).Watch(context.TODO(),
@@ -64,12 +67,11 @@ func watchForChanges(clientset *kubernetes.Clientset, cm_name, cm_key, namespace
 		if err != nil {
 			panic("Unable to create watcher")
 		}
-		updateCMFile(watcher.ResultChan(), writePath, cm_key, chConfig)
+		updateCMFile(watcher.ResultChan(), cm_key, chConfig)
 	}
 }
 
-func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chConfig chan bool) {
-	//key_in_cm := filepath.Base(writePath)
+func updateCMFile(eventChannel <-chan watch.Event, cm_key string, chConfig chan []byte) {
 	for {
 		event, open := <-eventChannel
 		if open {
@@ -86,12 +88,7 @@ func updateCMFile(eventChannel <-chan watch.Event, writePath, cm_key string, chC
 					for k, v := range updatedMap.Data {
 						log.Notice(fmt.Sprintf("Is %s == %s?", k, cm_key))
 						if k == cm_key {
-							log.Notice("writing to: " + writePath)
-							err := os.WriteFile(writePath, []byte(v), 0644)
-							chConfig <- true
-							if err != nil {
-								log.Emergency(err.Error())
-							}
+							chConfig <- []byte(v)
 						}
 					}
 
@@ -127,7 +124,7 @@ func main() {
 	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
 
 	// direct chan, instead of writing to fs
-	chConfig := make(chan bool)
+	chConfig := make(chan []byte, 1)
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName, k8sCMKey, k8s_watch_path, chConfig)
@@ -178,7 +175,15 @@ func main() {
 	// endless for loop which handles signals, file system events as well as termination of the child process
 	for {
 		select {
-		case <-chConfig:
+		case fileContents := <-chConfig:
+
+			log.Notice("Locking before writing.")
+			mu.Lock()
+			log.Notice("writing to: " + k8s_watch_path)
+			err := os.WriteFile(k8s_watch_path, fileContents, 0644)
+			if err != nil {
+				log.Emergency(err.Error())
+			}
 			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
 			tmp.Stdout = os.Stdout
 			tmp.Stderr = os.Stderr
@@ -196,10 +201,12 @@ func main() {
 				// old haproxy terminated - successfully started a new process replacing the old one
 				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
 				log.Notice("reload successful")
+				mu.Unlock()
 				cmd = tmp
 			case <-tmp.Terminated:
 				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
 				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
+				mu.Unlock()
 				log.Warning("reload failed")
 			}
 		case event := <-fswatch.Events:
