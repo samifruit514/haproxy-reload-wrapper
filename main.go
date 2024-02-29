@@ -22,6 +22,11 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+type queuedFile struct {
+	LastQueuedData []byte
+	ToBeProcessed  bool
+}
+
 var mu sync.Mutex
 
 func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan []byte) {
@@ -106,6 +111,17 @@ func updateCMFile(eventChannel <-chan watch.Event, cm_key string, chConfig chan 
 		}
 	}
 }
+func processQueuedFile(qf *queuedFile, chConfig chan []byte) {
+	if qf.ToBeProcessed {
+		qf.ToBeProcessed = false
+		log.Notice("Processing post-poned change")
+		// avoid blocking on channel, run in goroutine
+		go func() {
+			chConfig <- qf.LastQueuedData
+		}()
+	}
+
+}
 
 func main() {
 	// fetch the absolut path of the haproxy executable
@@ -124,7 +140,7 @@ func main() {
 	finalArgs = utils.ReplaceHaproxyConfigFilePath(finalArgs, k8s_watch_path)
 
 	// direct chan, instead of writing to fs
-	chConfig := make(chan []byte, 1)
+	chConfig := make(chan []byte)
 	if k8sWatcherEnabled {
 		log.Notice(fmt.Sprintf("Starting watcher for configmap: %s", k8sCMName))
 		startCMWatcher(k8sCMName, k8sCMKey, k8s_watch_path, chConfig)
@@ -172,13 +188,20 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 
+	var isCurrentlyReloading bool
+	queuedFile := &queuedFile{}
+	// var hasQueuedFile
 	// endless for loop which handles signals, file system events as well as termination of the child process
 	for {
 		select {
 		case fileContents := <-chConfig:
 
-			log.Notice("Locking before writing.")
-			mu.Lock()
+			if isCurrentlyReloading == true {
+				log.Notice("Haproxy is currently reloading, this change is postponed.")
+				queuedFile.LastQueuedData = fileContents
+				queuedFile.ToBeProcessed = true
+				continue
+			}
 			log.Notice("writing to: " + k8s_watch_path)
 			err := os.WriteFile(k8s_watch_path, fileContents, 0644)
 			if err != nil {
@@ -192,9 +215,9 @@ func main() {
 			if err := tmp.AsyncRun(); err != nil {
 				log.Warning(err.Error())
 				log.Warning("reload failed")
-				mu.Unlock()
 				continue
 			}
+			isCurrentlyReloading = true
 
 			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
 			select {
@@ -202,13 +225,17 @@ func main() {
 				// old haproxy terminated - successfully started a new process replacing the old one
 				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
 				log.Notice("reload successful")
-				mu.Unlock()
+				isCurrentlyReloading = false
+				// process the latest queued change, if any
+				processQueuedFile(queuedFile, chConfig)
 				cmd = tmp
 			case <-tmp.Terminated:
 				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
 				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
-				mu.Unlock()
+				isCurrentlyReloading = false
 				log.Warning("reload failed")
+				// process the latest queued change, if any
+				processQueuedFile(queuedFile, chConfig)
 			}
 		case event := <-fswatch.Events:
 			// only care about events which may modify the contents of the directory
