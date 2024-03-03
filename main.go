@@ -27,6 +27,7 @@ type queuedFile struct {
 	ToBeProcessed  bool
 }
 
+var Version string
 var mu sync.Mutex
 
 func startCMWatcher(k8sCMName, k8sCMKey, k8sCMWatchPath string, chConfig chan []byte) {
@@ -201,6 +202,8 @@ func main() {
 				queuedFile.LastQueuedData = fileContents
 				queuedFile.ToBeProcessed = true
 				continue
+			} else {
+				log.Notice("Haproxy is not currently reloading. Lets do it!")
 			}
 			log.Notice("writing to: " + k8s_watch_path)
 			err := os.WriteFile(k8s_watch_path, fileContents, 0644)
