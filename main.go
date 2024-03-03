@@ -125,6 +125,7 @@ func processQueuedFile(qf *queuedFile, chConfig chan []byte) {
 }
 
 func main() {
+	fmt.Println("haproxy-reload-wrapper version " + Version)
 	// fetch the absolut path of the haproxy executable
 	executable, err := utils.LookupExecutablePathAbs("haproxy")
 	if err != nil {
