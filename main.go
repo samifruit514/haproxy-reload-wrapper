@@ -197,50 +197,60 @@ func main() {
 	for {
 		select {
 		case fileContents := <-chConfig:
-
+			mu.Lock()
 			if isCurrentlyReloading == true {
 				log.Notice("Haproxy is currently reloading, this change is postponed.")
 				queuedFile.LastQueuedData = fileContents
 				queuedFile.ToBeProcessed = true
+				mu.Unlock()
 				continue
 			} else {
 				log.Notice("Haproxy is not currently reloading. Lets do it!")
+				isCurrentlyReloading = true
 			}
-			log.Notice("writing to: " + k8s_watch_path)
-			err := os.WriteFile(k8s_watch_path, fileContents, 0644)
-			if err != nil {
-				log.Emergency(err.Error())
-			}
-			tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
-			tmp.Stdout = os.Stdout
-			tmp.Stderr = os.Stderr
-			tmp.Env = utils.LoadEnvFile()
+			mu.Unlock()
 
-			if err := tmp.AsyncRun(); err != nil {
-				log.Warning(err.Error())
-				log.Warning("reload failed")
-				continue
-			}
-			isCurrentlyReloading = true
+			go func() {
 
-			log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
-			select {
-			case <-cmd.Terminated:
-				// old haproxy terminated - successfully started a new process replacing the old one
-				log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
-				log.Notice("reload successful")
-				isCurrentlyReloading = false
-				// process the latest queued change, if any
-				processQueuedFile(queuedFile, chConfig)
-				cmd = tmp
-			case <-tmp.Terminated:
-				// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
-				log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
-				isCurrentlyReloading = false
-				log.Warning("reload failed")
-				// process the latest queued change, if any
-				processQueuedFile(queuedFile, chConfig)
-			}
+				log.Notice("writing to: " + k8s_watch_path)
+				err := os.WriteFile(k8s_watch_path, fileContents, 0644)
+				if err != nil {
+					log.Emergency(err.Error())
+				}
+				tmp := exec.Command(executable, append([]string{"-x", utils.LookupHAProxySocketPath(), "-sf", strconv.Itoa(cmd.Process.Pid)}, finalArgs[1:]...)...)
+				tmp.Stdout = os.Stdout
+				tmp.Stderr = os.Stderr
+				tmp.Env = utils.LoadEnvFile()
+
+				if err := tmp.AsyncRun(); err != nil {
+					log.Warning(err.Error())
+					log.Warning("reload failed")
+					return
+				}
+
+				log.Notice(fmt.Sprintf("process %d started", tmp.Process.Pid))
+				select {
+				case <-cmd.Terminated:
+					// old haproxy terminated - successfully started a new process replacing the old one
+					log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
+					log.Notice("reload successful")
+					mu.Lock()
+					isCurrentlyReloading = false
+					// process the latest queued change, if any
+					processQueuedFile(queuedFile, chConfig)
+					cmd = tmp
+					mu.Unlock()
+				case <-tmp.Terminated:
+					// new haproxy terminated without terminating the old process - this can happen if the modified configuration file was invalid
+					mu.Lock()
+					log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
+					log.Warning("reload failed")
+					isCurrentlyReloading = false
+					// process the latest queued change, if any
+					processQueuedFile(queuedFile, chConfig)
+					mu.Unlock()
+				}
+			}()
 		case event := <-fswatch.Events:
 			// only care about events which may modify the contents of the directory
 			if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Create)) {
