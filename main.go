@@ -295,9 +295,18 @@ func main() {
 		case err := <-fswatch.Errors:
 			// handle errors of fsnotify.Watcher
 			log.Alert(err.Error())
+		}
+		// second select to handle cmd and sigs, only if process is NOT in the middle of reloading
+		mu.Lock()
+		if isCurrentlyReloading == true {
+			mu.Unlock()
+			continue
+		}
+		mu.Unlock()
+		select {
 		case sig := <-sigs:
 			// handle SIGINT, SIGTERM, SIGUSR1 and propagate it to child process
-			log.Notice(fmt.Sprintf("received singal %d", sig))
+			log.Notice(fmt.Sprintf("received signal %d", sig))
 
 			if cmd.Process == nil {
 				// received termination suddenly before child process was even started
