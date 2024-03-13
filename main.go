@@ -22,9 +22,10 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type queuedFile struct {
+type queuedReload struct {
 	LastQueuedData []byte
 	ToBeProcessed  bool
+	Busy           bool
 }
 
 var Version string
@@ -112,13 +113,13 @@ func updateCMFile(eventChannel <-chan watch.Event, cm_key string, chConfig chan 
 		}
 	}
 }
-func processQueuedFile(qf *queuedFile, chConfig chan []byte) {
-	if qf.ToBeProcessed {
-		qf.ToBeProcessed = false
+func processQueuedReload(qr *queuedReload, chConfig chan []byte) {
+	if qr.ToBeProcessed {
+		qr.ToBeProcessed = false
 		log.Notice("Processing post-poned change")
 		// avoid blocking on channel, run in goroutine
 		go func() {
-			chConfig <- qf.LastQueuedData
+			chConfig <- qr.LastQueuedData
 		}()
 	}
 
@@ -181,7 +182,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	log.Notice(fmt.Sprintf("watch : %s", watchPath))
 
 	// flag used for termination handling
 	var terminated bool
@@ -190,23 +190,23 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1)
 
-	var isCurrentlyReloading bool
-	queuedFile := &queuedFile{}
+	//var isCurrentlyReloading bool
+	queuedReload := &queuedReload{}
 	// var hasQueuedFile
 	// endless for loop which handles signals, file system events as well as termination of the child process
 	for {
 		select {
 		case fileContents := <-chConfig:
 			mu.Lock()
-			if isCurrentlyReloading == true {
+			if queuedReload.Busy == true {
 				log.Notice("Haproxy is currently reloading, this change is postponed.")
-				queuedFile.LastQueuedData = fileContents
-				queuedFile.ToBeProcessed = true
+				queuedReload.LastQueuedData = fileContents
+				queuedReload.ToBeProcessed = true
 				mu.Unlock()
 				continue
 			} else {
 				log.Notice("Haproxy is not currently reloading. Lets do it!")
-				isCurrentlyReloading = true
+				queuedReload.Busy = true
 			}
 			mu.Unlock()
 
@@ -235,9 +235,9 @@ func main() {
 					log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
 					log.Notice("reload successful")
 					mu.Lock()
-					isCurrentlyReloading = false
+					queuedReload.Busy = false
 					// process the latest queued change, if any
-					processQueuedFile(queuedFile, chConfig)
+					processQueuedReload(queuedReload, chConfig)
 					cmd = tmp
 					mu.Unlock()
 				case <-tmp.Terminated:
@@ -245,9 +245,9 @@ func main() {
 					mu.Lock()
 					log.Warning(fmt.Sprintf("process %d terminated unexpectedly : %s", tmp.Process.Pid, tmp.Status()))
 					log.Warning("reload failed")
-					isCurrentlyReloading = false
+					queuedReload.Busy = false
 					// process the latest queued change, if any
-					processQueuedFile(queuedFile, chConfig)
+					processQueuedReload(queuedReload, chConfig)
 					mu.Unlock()
 				}
 			}()
@@ -298,7 +298,7 @@ func main() {
 		}
 		// second select to handle cmd and sigs, only if process is NOT in the middle of reloading
 		mu.Lock()
-		if isCurrentlyReloading == true {
+		if queuedReload.Busy == true {
 			mu.Unlock()
 			continue
 		}
@@ -333,6 +333,8 @@ func main() {
 
 			log.Notice(fmt.Sprintf("process %d terminated : %s", cmd.Process.Pid, cmd.Status()))
 			os.Exit(cmd.ProcessState.ExitCode())
+		default:
+			// everything is good with the current process. Loop for the next event
 		}
 	}
 }
